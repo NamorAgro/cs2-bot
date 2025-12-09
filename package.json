@@ -1,0 +1,37 @@
+{
+  "name": "trading-bot",
+  "version": "1.0.0",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "dev": "node bot.js"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.17.0",
+    "express": "^5.1.0",
+    "steam-totp": "^2.1.2",
+    "steam-tradeoffer-manager": "^2.12.2",
+    "steam-user": "^5.2.3",
+    "steamcommunity": "^3.49.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/NamorAgro/cs2-bot.git"
+  },
+  "keywords": [
+    "bot",
+    "for",
+    "cs2",
+    "trading"
+  ],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/NamorAgro/cs2-bot/issues"
+  },
+  "homepage": "https://github.com/NamorAgro/cs2-bot#readme",
+  "description": "",
+  "devDependencies": {
+    "prisma": "^6.17.0"
+  }
+}
