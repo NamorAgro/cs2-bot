@@ -1,22 +1,42 @@
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
+require('dotenv').config();
 
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
-require('dotenv').config();
 
 const SteamUser = require('steam-user');
 const SteamCommunity = require('steamcommunity');
 const SteamTotp = require('steam-totp');
 const TradeOfferManager = require('steam-tradeoffer-manager');
 
+// ================== CONFIG & ENV ==================
+
+const API_BASE_URL = process.env.API_BASE_URL;     
+const BOT_API_KEY = process.env.BOT_API_KEY;       
+const STEAM_BOT_PASSWORD = process.env.STEAM_BOT_PASSWORD;
+
+if (!API_BASE_URL) {
+  console.error('❌ API_BASE_URL is not set in .env');
+  process.exit(1);
+}
+
+if (!BOT_API_KEY) {
+  console.error('❌ BOT_API_KEY is not set in .env');
+  process.exit(1);
+}
+
+if (!STEAM_BOT_PASSWORD) {
+  console.error('❌ STEAM_BOT_PASSWORD is not set in .env');
+  process.exit(1);
+}
+
+// ================== STEAM AUTH ==================
 
 const maFilePath = path.join(__dirname, '..', 'lib', 'secrets', 'bot.maFile');
 
 if (!fs.existsSync(maFilePath)) {
-    console.error('❌ maFile not found at', maFilePath);
-    process.exit(1);
+  console.error('❌ maFile not found at', maFilePath);
+  process.exit(1);
 }
 
 const maDataRaw = fs.readFileSync(maFilePath, 'utf8');
@@ -25,29 +45,23 @@ const maData = JSON.parse(maDataRaw);
 const accountName = maData.account_name;
 const sharedSecret = maData.shared_secret;
 
-if (!process.env.STEAM_BOT_PASSWORD) {
-    console.error('❌ STEAM_BOT_PASSWORD is not set in .env');
-    process.exit(1);
-}
-
-const password = process.env.STEAM_BOT_PASSWORD;
-
 const client = new SteamUser();
 const community = new SteamCommunity();
 
-// === TradeOfferManager ===
 const manager = new TradeOfferManager({
-    steam: client,
-    community: community,
-    language: 'en'
+  steam: client,
+  community: community,
+  language: 'en'
 });
 
-const twoFactorCode = SteamTotp.generateAuthCode(sharedSecret);
+function getTwoFactorCode() {
+  return SteamTotp.generateAuthCode(sharedSecret);
+}
 
 const logOnOptions = {
-    accountName,
-    password,
-    twoFactorCode
+  accountName,
+  password: STEAM_BOT_PASSWORD,
+  twoFactorCode: getTwoFactorCode()
 };
 
 console.log('🔐 Logging in as', accountName, '...');
@@ -55,117 +69,116 @@ console.log('🔐 Logging in as', accountName, '...');
 client.logOn(logOnOptions);
 
 client.on('loggedOn', () => {
-    console.log('✅ Bot logged in to Steam!');
-    client.setPersona(SteamUser.EPersonaState.Online);
+  console.log('✅ Bot logged in to Steam!');
+  client.setPersona(SteamUser.EPersonaState.Online);
 });
 
-// web-ssions
 client.on('webSession', (sessionId, cookies) => {
-    console.log('🌐 Got web session, cookies count:', cookies.length);
+  console.log('🌐 Got web session, cookies count:', cookies.length);
 
-    community.setCookies(cookies);
+  community.setCookies(cookies);
 
-    manager.setCookies(cookies, (err) => {
-        if (err) {
-            console.error('❌ Error setting TradeOfferManager cookies:', err);
-            return;
-        }
+  manager.setCookies(cookies, (err) => {
+    if (err) {
+      console.error('❌ Error setting TradeOfferManager cookies:', err);
+      return;
+    }
 
-        console.log('✅ TradeOfferManager is ready');
-        manager.getInventoryContents(730, 2, true, (invErr, inventory) => {
-            if (invErr) {
-                console.error('❌ Error loading inventory:', invErr);
-                return;
-            }
+    console.log('✅ TradeOfferManager is ready');
 
-            console.log(`🎒 Bot CS2 inventory loaded. Items count: ${inventory.length}`);
+    // Тест: грузим инвентарь бота
+    manager.getInventoryContents(730, 2, true, (invErr, inventory) => {
+      if (invErr) {
+        console.error('❌ Error loading bot inventory:', invErr);
+        return;
+      }
 
-            if (inventory.length > 0) {
-                console.log('Примеры предметов:');
-                inventory.slice(0, 5).forEach((item, idx) => {
-                    console.log(
-                        `#${idx + 1}: ${item.market_hash_name} (assetid=${item.assetid})`
-                    );
-                });
-            } else {
-                console.log('⚠ У бота пустой инвентарь CS2 (730, contextId=2)');
-            }
+      console.log(`🎒 Bot CS2 inventory loaded. Items count: ${inventory.length}`);
+
+      if (inventory.length > 0) {
+        console.log('Примеры предметов:');
+        inventory.slice(0, 5).forEach((item, idx) => {
+          console.log(
+            `#${idx + 1}: ${item.market_hash_name} (assetid=${item.assetid})`
+          );
         });
+      } else {
+        console.log('⚠ У бота пустой инвентарь CS2 (730, contextId=2)');
+      }
     });
+  });
 });
 
 client.on('error', (err) => {
-    console.error('❌ Steam error:', err);
+  console.error('❌ Steam error:', err);
 });
 
-
-// ====== EXPRESS API ====
+// ================== EXPRESS API ==================
 
 const app = express();
 app.use(express.json());
 
-app.post('/get-inventory', (req, res) => {
-    const steamId = req.body.steamId;
-    console.log(steamId)
-    if (!steamId) {
-        return res.json({ ok: false, error: 'steamId required' });
-    }
 
-    console.log(`📦 Request inventory for steamId: ${steamId}`);
+app.use((req, res, next) => {
+  const key = req.headers['x-bot-api-key'];
 
-    manager.getUserInventoryContents('76561199389462063', 730, 2, false, (err, inv) => {
-        console.log('730 / 2:', err, inv?.length);
-    });
+  if (!key || key !== BOT_API_KEY) {
+    console.warn('⚠ Unauthorized request to bot API from', req.ip);
+    return res.status(401).json({ ok: false, error: 'Unauthorized' });
+  }
 
-    manager.getUserInventoryContents('76561199389462063', 730, 1, false, (err, inv) => {
-        console.log('730 / 1:', err, inv?.length);
-    });
-
-    manager.getUserInventoryContents('76561199389462063', 730, 3, true, (err, inv) => {
-        console.log('730 / 3:', err, inv);
-    });
-
-    manager.getUserInventoryContents(steamId, 730, 2, true, (err, inventory) => {
-        if (err) {
-            console.error('❌ Error loading user inventory:', err);
-            return res.json({ ok: false, error: err.message });
-        }
-
-        const mapped = inventory.map((item) => ({
-            assetid: item.assetid,
-            classid: item.classid,
-            market_hash_name: item.market_hash_name,
-            icon: item.icon_url
-                ? `https://steamcommunity-a.akamaihd.net/economy/image/${item.icon_url}`
-                : null,
-        }));
-
-        res.json({
-            ok: true,
-            count: mapped.length,
-            items: mapped
-        });
-    });
+  next();
 });
 
+// ---- /get-inventory ----
+app.post('/get-inventory', (req, res) => {
+  const steamId = req.body.steamId;
 
+  if (!steamId) {
+    return res.json({ ok: false, error: 'steamId required' });
+  }
+
+  console.log(`📦 Request inventory for steamId: ${steamId}`);
+
+  manager.getUserInventoryContents(steamId, 730, 2, true, (err, inventory) => {
+    if (err) {
+      console.error('❌ Error loading user inventory:', err);
+      return res.json({ ok: false, error: err.message });
+    }
+
+    const mapped = inventory.map((item) => ({
+      assetid: item.assetid,
+      classid: item.classid,
+      market_hash_name: item.market_hash_name,
+      icon: item.icon_url
+        ? `https://steamcommunity-a.akamaihd.net/economy/image/${item.icon_url}`
+        : null,
+    }));
+
+    res.json({
+      ok: true,
+      count: mapped.length,
+      items: mapped
+    });
+  });
+});
+
+// ---- /create-offer ----
 app.post('/create-offer', (req, res) => {
   const { steamId, tradeUrl, assetids } = req.body;
 
   if (!steamId || !tradeUrl || !Array.isArray(assetids) || assetids.length === 0) {
-    return res.json({ ok: false, error: 'steamId, tradeUrl  assetids ' });
+    return res.json({ ok: false, error: 'steamId, tradeUrl и assetids обязательны' });
   }
 
   console.log(`📨 Create offer for steamId=${steamId}, items=${assetids.length}`);
 
-  // Сначала подтягиваем инвентарь пользователя, чтобы получить объекты предметов
   manager.getUserInventoryContents(steamId, 730, 2, true, (err, inventory) => {
     if (err) {
       console.error('❌ Error loading user inventory (for offer):', err);
       return res.json({ ok: false, error: err.message });
     }
 
-    // ищем нужные assetid'ы
     const itemsToTake = inventory.filter((it) => assetids.includes(it.assetid));
 
     if (!itemsToTake.length) {
@@ -174,7 +187,6 @@ app.post('/create-offer', (req, res) => {
     }
 
     const offer = manager.createOffer(tradeUrl);
-    console.log(offer)
     offer.addTheirItems(itemsToTake);
     offer.setMessage('Выкуп ваших CS2 скинов на нашем сайте');
 
@@ -194,61 +206,54 @@ app.post('/create-offer', (req, res) => {
   });
 });
 
+// ================== statuys ==================
+
 manager.on('sentOfferChanged', async (offer, oldState) => {
   const E = TradeOfferManager.ETradeOfferState;
 
   console.log(`🔄 Offer state changed: id=${offer.id}, state=${offer.state}`);
 
-  const sellRequest = await prisma.sellRequest.findFirst({
-    where: { tradeOfferId: String(offer.id) },
-  });
 
-  if (!sellRequest) {
-    console.log('⚠ SellRequest not found for offer', offer.id);
-    return;
-  }
+  let status = 'UNKNOWN';
 
-  if (offer.state === E.Accepted) {
-    console.log('✅ Trade accepted for SellRequest', sellRequest.id);
+  if (offer.state === E.Accepted) status = 'ACCEPTED';
+  else if (offer.state === E.Canceled) status = 'CANCELED';
+  else if (offer.state === E.Declined) status = 'DECLINED';
+  else if (offer.state === E.Expired) status = 'EXPIRED';
+  else if (offer.state === E.InEscrow) status = 'ESCROW';
 
-    const lockDays = 8;
-    const lockedUntil = new Date(Date.now() + lockDays * 24 * 60 * 60 * 1000);
 
-    await prisma.$transaction([
-      prisma.sellRequest.update({
-        where: { id: sellRequest.id },
-        data: {
-          status: 'LOCKED',
-          lockedUntil,
-        },
+  try {
+
+    const response = await fetch(`${API_BASE_URL}/api/steam/offer-state-changed`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-bot-api-key': BOT_API_KEY, 
+      },
+      body: JSON.stringify({
+        offerId: String(offer.id),
+        state: status,
+        rawState: offer.state,
       }),
-      prisma.user.update({
-        where: { id: sellRequest.userId },
-        data: {
-          lockedBalance: {
-            increment: sellRequest.totalPrice,
-          },
-        },
-      }),
-    ]);
-
-    console.log(
-      `💰 Locked ${sellRequest.totalPrice} ${sellRequest.currency} for user=${sellRequest.userId} until=${lockedUntil.toISOString()}`
-    );
-  } else if (
-    offer.state === E.Canceled ||
-    offer.state === E.Declined ||
-    offer.state === E.Expired
-  ) {
-    console.log('⚠ Offer was not accepted. State=', offer.state);
-    await prisma.sellRequest.update({
-      where: { id: sellRequest.id },
-      data: { status: 'CANCELED' },
     });
+
+    const data = await response.json().catch(() => ({}));
+
+    if (!response.ok || !data.ok) {
+      console.error('❌ API responded with error on offer-state-changed:', data);
+    } else {
+      console.log('📨 API confirmed offer-state-changed:', data);
+    }
+  } catch (apiErr) {
+    console.error('❌ Failed to notify API about offer state:', apiErr);
   }
 });
 
+// ================== START SERVER ==================
 
-app.listen(3002, () => {
-    console.log('🚀 Bot API running at http://localhost:3002');
+const PORT = process.env.PORT || 3002;
+
+app.listen(PORT, '127.0.0.1', () => {
+  console.log(`🚀 Bot API running on http://127.0.0.1:${PORT}`);
 });
