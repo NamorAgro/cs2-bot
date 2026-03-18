@@ -60,14 +60,21 @@ function refreshWebSession() {
 
       manager.setCookies(cookies, (err) => {
         if (err) {
-          console.log(err)
           isBotReady = false;
           return reject(err);
         }
 
-        isBotReady = true;
-        console.log('✅ TradeOfferManager cookies refreshed');
-        resolve();
+        community.acknowledgeTradeProtection((ackErr) => {
+          if (ackErr) {
+            isBotReady = false;
+            return reject(ackErr);
+          }
+
+          isBotReady = true;
+          console.log('✅ Trade protection acknowledged');
+          console.log('✅ TradeOfferManager cookies refreshed');
+          resolve();
+        });
       });
     };
 
@@ -151,27 +158,36 @@ client.on('webSession', (sessionId, cookies) => {
       return;
     }
 
-    isBotReady = true;
-    console.log('✅ TradeOfferManager is ready');
-
-    manager.getInventoryContents(730, 2, true, (invErr, inventory) => {
-      if (invErr) {
-        console.error('❌ Error loading bot inventory:', invErr);
+    community.acknowledgeTradeProtection((ackErr) => {
+      if (ackErr) {
+        console.error('❌ Error acknowledging trade protection:', ackErr);
+        isBotReady = false;
         return;
       }
 
-      console.log(`🎒 Bot CS2 inventory loaded. Items count: ${inventory.length}`);
+      isBotReady = true;
+      console.log('✅ Trade protection acknowledged');
+      console.log('✅ TradeOfferManager is ready');
 
-      if (inventory.length > 0) {
-        console.log('Примеры предметов:');
-        inventory.slice(0, 5).forEach((item, idx) => {
-          console.log(
-            `#${idx + 1}: ${item.market_hash_name} (assetid=${item.assetid})`
-          );
-        });
-      } else {
-        console.log('⚠ У бота пустой инвентарь CS2 (730, contextId=2)');
-      }
+      manager.getInventoryContents(730, 2, true, (invErr, inventory) => {
+        if (invErr) {
+          console.error('❌ Error loading bot inventory:', invErr);
+          return;
+        }
+
+        console.log(`🎒 Bot CS2 inventory loaded. Items count: ${inventory.length}`);
+
+        if (inventory.length > 0) {
+          console.log('Примеры предметов:');
+          inventory.slice(0, 5).forEach((item, idx) => {
+            console.log(
+              `#${idx + 1}: ${item.market_hash_name} (assetid=${item.assetid})`
+            );
+          });
+        } else {
+          console.log('⚠ У бота пустой инвентарь CS2 (730, contextId=2)');
+        }
+      });
     });
   });
 });
