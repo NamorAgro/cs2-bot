@@ -1,5 +1,6 @@
 require('dotenv').config();
 
+
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
@@ -11,8 +12,8 @@ const TradeOfferManager = require('steam-tradeoffer-manager');
 
 // ================== CONFIG & ENV ==================
 
-const API_BASE_URL = process.env.API_BASE_URL;     
-const BOT_API_KEY = process.env.BOT_API_KEY;       
+const API_BASE_URL = process.env.API_BASE_URL;
+const BOT_API_KEY = process.env.BOT_API_KEY;
 const STEAM_BOT_PASSWORD = process.env.STEAM_BOT_PASSWORD;
 
 if (!API_BASE_URL) {
@@ -31,8 +32,72 @@ if (!STEAM_BOT_PASSWORD) {
 }
 
 // ================== STEAM AUTH ==================
+const OFFER_MAP_PATH = path.join(__dirname, 'offer-callbacks.json');
 
-const maFilePath = path.join(__dirname, '..', 'lib', 'secrets', 'bot.maFile');
+let isBotReady = false;
+
+function refreshWebSession() {
+  return new Promise((resolve, reject) => {
+    console.log('🔄 Refreshing Steam web session...');
+
+    let settled = false;
+
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      client.removeListener('webSession', onWebSession);
+      reject(new Error('Timeout while refreshing Steam web session'));
+    }, 15000);
+
+    const onWebSession = (sessionId, cookies) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+
+      console.log('🌐 Got refreshed web session, cookies count:', cookies.length);
+
+      community.setCookies(cookies);
+
+      manager.setCookies(cookies, (err) => {
+        if (err) {
+          isBotReady = false;
+          return reject(err);
+        }
+
+        isBotReady = true;
+        console.log('✅ TradeOfferManager cookies refreshed');
+        resolve();
+      });
+    };
+
+    client.once('webSession', onWebSession);
+    client.webLogOn();
+  });
+}
+
+function loadOfferMap() {
+  try {
+    return JSON.parse(fs.readFileSync(OFFER_MAP_PATH, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+function saveOfferMap(map) {
+  fs.writeFileSync(OFFER_MAP_PATH, JSON.stringify(map, null, 2));
+}
+
+function setOfferCallback(offerId, callbackUrl) {
+  const map = loadOfferMap();
+  map[String(offerId)] = { callbackUrl, createdAt: Date.now() };
+  saveOfferMap(map);
+}
+
+function getOfferCallback(offerId) {
+  const map = loadOfferMap();
+  return map[String(offerId)]?.callbackUrl || null;
+}
+const maFilePath = path.join(__dirname, 'lib', 'secrets', 'bot.maFile');
 
 if (!fs.existsSync(maFilePath)) {
   console.error('❌ maFile not found at', maFilePath);
@@ -131,43 +196,68 @@ app.use((req, res, next) => {
 });
 
 // ---- /get-inventory ----
-app.post('/get-inventory', (req, res) => {
-  const steamId = req.body.steamId;
+app.post('/create-offer', async (req, res) => {
+  const { steamId, tradeUrl, assetids } = req.body;
 
-  if (!steamId) {
-    return res.json({ ok: false, error: 'steamId required' });
+  if (!steamId || !tradeUrl || !Array.isArray(assetids) || assetids.length === 0) {
+    return res.json({ ok: false, error: 'steamId, tradeUrl и assetids обязательны' });
   }
 
-  console.log(`📦 Request inventory for steamId: ${steamId}`);
+  if (!isBotReady) {
+    return res.json({ ok: false, error: 'Bot is not ready yet' });
+  }
 
-  manager.getUserInventoryContents(steamId, 730, 2, true, (err, inventory) => {
-    if (err) {
-      console.error('❌ Error loading user inventory:', err);
-      return res.json({ ok: false, error: err.message });
+  console.log(`📨 Create offer for steamId=${steamId}, items=${assetids.length}`);
+
+  try {
+    const inventory = await new Promise((resolve, reject) => {
+      manager.getUserInventoryContents(steamId, 730, 2, true, (err, inventory) => {
+        if (err) return reject(err);
+        resolve(inventory);
+      });
+    });
+
+    const itemsToTake = inventory.filter((it) => assetids.includes(it.assetid));
+
+    if (!itemsToTake.length) {
+      console.error('⚠ No matching items in user inventory for given assetids');
+      return res.json({ ok: false, error: 'Не нашли выбранные предметы в инвентаре' });
     }
 
-    const mapped = inventory.map((item) => ({
-      assetid: item.assetid,
-      classid: item.classid,
-      market_hash_name: item.market_hash_name,
-      icon: item.icon_url
-        ? `https://steamcommunity-a.akamaihd.net/economy/image/${item.icon_url}`
-        : null,
-    }));
+    await refreshWebSession();
 
-    res.json({
-      ok: true,
-      count: mapped.length,
-      items: mapped
+    const offer = manager.createOffer(tradeUrl);
+    offer.addTheirItems(itemsToTake);
+    offer.setMessage('Выкуп ваших CS2 скинов на нашем сайте');
+
+    const result = await new Promise((resolve, reject) => {
+      offer.send((sendErr, status) => {
+        if (sendErr) return reject(sendErr);
+        resolve(status);
+      });
     });
-  });
+
+    console.log(`✅ Offer sent. ID=${offer.id}, status=${result}`);
+
+    return res.json({
+      ok: true,
+      offerId: offer.id,
+      status: result,
+    });
+  } catch (err) {
+    console.error('❌ Error sending offer:', err);
+    return res.json({
+      ok: false,
+      error: err.message || 'Unknown error',
+    });
+  }
 });
 
 // ---- /create-offer ----
 app.post('/create-offer', (req, res) => {
-  const { steamId, tradeUrl, assetids } = req.body;
+  const { steamId, tradeUrl, assetids, callbackUrl } = req.body;
 
-  if (!steamId || !tradeUrl || !Array.isArray(assetids) || assetids.length === 0) {
+  if (!steamId || !tradeUrl || !Array.isArray(assetids) || assetids.length === 0 || !callbackUrl) {
     return res.json({ ok: false, error: 'steamId, tradeUrl и assetids обязательны' });
   }
 
@@ -197,6 +287,7 @@ app.post('/create-offer', (req, res) => {
       }
 
       console.log(`✅ Offer sent. ID=${offer.id}, status=${status}`);
+      setOfferCallback(offer.id, callbackUrl);
       res.json({
         ok: true,
         offerId: offer.id,
@@ -222,14 +313,20 @@ manager.on('sentOfferChanged', async (offer, oldState) => {
   else if (offer.state === E.Expired) status = 'EXPIRED';
   else if (offer.state === E.InEscrow) status = 'ESCROW';
 
+  const callbackUrl = getOfferCallback(offer.id);
+
+  if (!callbackUrl) {
+    console.warn('⚠ No callbackUrl for offerId', offer.id, '— skipping notify');
+    return;
+  }
 
   try {
 
-    const response = await fetch(`${API_BASE_URL}/api/steam/offer-state-changed`, {
+    const response = await fetch(callbackUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-bot-api-key': BOT_API_KEY, 
+        'x-bot-api-key': BOT_API_KEY,
       },
       body: JSON.stringify({
         offerId: String(offer.id),
