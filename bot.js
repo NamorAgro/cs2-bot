@@ -196,6 +196,39 @@ app.use((req, res, next) => {
 });
 
 // ---- /get-inventory ----
+app.post('/get-inventory', (req, res) => {
+  const steamId = req.body.steamId;
+
+  if (!steamId) {
+    return res.json({ ok: false, error: 'steamId required' });
+  }
+
+  console.log(`📦 Request inventory for steamId: ${steamId}`);
+
+  manager.getUserInventoryContents(steamId, 730, 2, true, (err, inventory) => {
+    if (err) {
+      console.error('❌ Error loading user inventory:', err);
+      return res.json({ ok: false, error: err.message });
+    }
+
+    const mapped = inventory.map((item) => ({
+      assetid: item.assetid,
+      classid: item.classid,
+      market_hash_name: item.market_hash_name,
+      icon: item.icon_url
+        ? `https://steamcommunity-a.akamaihd.net/economy/image/${item.icon_url}`
+        : null,
+    }));
+
+    res.json({
+      ok: true,
+      count: mapped.length,
+      items: mapped
+    });
+  });
+});
+
+// ---- /create-offer ----
 app.post('/create-offer', async (req, res) => {
   const { steamId, tradeUrl, assetids } = req.body;
 
@@ -251,50 +284,6 @@ app.post('/create-offer', async (req, res) => {
       error: err.message || 'Unknown error',
     });
   }
-});
-
-// ---- /create-offer ----
-app.post('/create-offer', (req, res) => {
-  const { steamId, tradeUrl, assetids, callbackUrl } = req.body;
-
-  if (!steamId || !tradeUrl || !Array.isArray(assetids) || assetids.length === 0 || !callbackUrl) {
-    return res.json({ ok: false, error: 'steamId, tradeUrl и assetids обязательны' });
-  }
-
-  console.log(`📨 Create offer for steamId=${steamId}, items=${assetids.length}`);
-
-  manager.getUserInventoryContents(steamId, 730, 2, true, (err, inventory) => {
-    if (err) {
-      console.error('❌ Error loading user inventory (for offer):', err);
-      return res.json({ ok: false, error: err.message });
-    }
-
-    const itemsToTake = inventory.filter((it) => assetids.includes(it.assetid));
-
-    if (!itemsToTake.length) {
-      console.error('⚠ No matching items in user inventory for given assetids');
-      return res.json({ ok: false, error: 'Не нашли выбранные предметы в инвентаре' });
-    }
-
-    const offer = manager.createOffer(tradeUrl);
-    offer.addTheirItems(itemsToTake);
-    offer.setMessage('Выкуп ваших CS2 скинов на нашем сайте');
-
-    offer.send((sendErr, status) => {
-      if (sendErr) {
-        console.error('❌ Error sending offer:', sendErr);
-        return res.json({ ok: false, error: sendErr.message });
-      }
-
-      console.log(`✅ Offer sent. ID=${offer.id}, status=${status}`);
-      setOfferCallback(offer.id, callbackUrl);
-      res.json({
-        ok: true,
-        offerId: offer.id,
-        status,
-      });
-    });
-  });
 });
 
 // ================== statuys ==================
