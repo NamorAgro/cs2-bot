@@ -60,6 +60,7 @@ function refreshWebSession() {
 
       manager.setCookies(cookies, (err) => {
         if (err) {
+          console.log(err)
           isBotReady = false;
           return reject(err);
         }
@@ -146,12 +147,13 @@ client.on('webSession', (sessionId, cookies) => {
   manager.setCookies(cookies, (err) => {
     if (err) {
       console.error('❌ Error setting TradeOfferManager cookies:', err);
+      isBotReady = false;
       return;
     }
 
+    isBotReady = true;
     console.log('✅ TradeOfferManager is ready');
 
-    // Тест: грузим инвентарь бота
     manager.getInventoryContents(730, 2, true, (invErr, inventory) => {
       if (invErr) {
         console.error('❌ Error loading bot inventory:', invErr);
@@ -236,10 +238,6 @@ app.post('/create-offer', async (req, res) => {
     return res.json({ ok: false, error: 'steamId, tradeUrl и assetids обязательны' });
   }
 
-  if (!isBotReady) {
-    return res.json({ ok: false, error: 'Bot is not ready yet' });
-  }
-
   console.log(`📨 Create offer for steamId=${steamId}, items=${assetids.length}`);
 
   try {
@@ -279,6 +277,8 @@ app.post('/create-offer', async (req, res) => {
     });
   } catch (err) {
     console.error('❌ Error sending offer:', err);
+    isBotReady = false;
+
     return res.json({
       ok: false,
       error: err.message || 'Unknown error',
