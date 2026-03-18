@@ -248,10 +248,10 @@ app.post('/get-inventory', (req, res) => {
 
 // ---- /create-offer ----
 app.post('/create-offer', async (req, res) => {
-  const { steamId, tradeUrl, assetids } = req.body;
+  const { steamId, tradeUrl, assetids, callbackUrl } = req.body;
 
-  if (!steamId || !tradeUrl || !Array.isArray(assetids) || assetids.length === 0) {
-    return res.json({ ok: false, error: 'steamId, tradeUrl и assetids обязательны' });
+  if (!steamId || !tradeUrl || !Array.isArray(assetids) || assetids.length === 0 || !callbackUrl) {
+    return res.json({ ok: false, error: 'steamId, tradeUrl, assetids и callbackUrl обязательны' });
   }
 
   console.log(`📨 Create offer for steamId=${steamId}, items=${assetids.length}`);
@@ -284,7 +284,10 @@ app.post('/create-offer', async (req, res) => {
       });
     });
 
+    setOfferCallback(String(offer.id), callbackUrl);
+
     console.log(`✅ Offer sent. ID=${offer.id}, status=${result}`);
+    console.log(`🔗 Saved callback for offer ${offer.id}: ${callbackUrl}`);
 
     return res.json({
       ok: true,
