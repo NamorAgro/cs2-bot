@@ -38,6 +38,11 @@ let isBotReady = false;
 
 function refreshWebSession() {
   return new Promise((resolve, reject) => {
+    if (!client.steamID) {
+      isBotReady = false;
+      return reject(new Error('Bot is not connected to Steam network yet'));
+    }
+
     console.log('🔄 Refreshing Steam web session...');
 
     let settled = false;
@@ -54,8 +59,6 @@ function refreshWebSession() {
       settled = true;
       clearTimeout(timeout);
 
-      console.log('🌐 Got refreshed web session, cookies count:', cookies.length);
-
       community.setCookies(cookies);
 
       manager.setCookies(cookies, (err) => {
@@ -64,22 +67,22 @@ function refreshWebSession() {
           return reject(err);
         }
 
-        community.acknowledgeTradeProtection((ackErr) => {
-          if (ackErr) {
-            isBotReady = false;
-            return reject(ackErr);
-          }
-
-          isBotReady = true;
-          console.log('✅ Trade protection acknowledged');
-          console.log('✅ TradeOfferManager cookies refreshed');
-          resolve();
-        });
+        isBotReady = true;
+        console.log('✅ TradeOfferManager cookies refreshed');
+        resolve();
       });
     };
 
     client.once('webSession', onWebSession);
-    client.webLogOn();
+
+    try {
+      client.webLogOn();
+    } catch (err) {
+      clearTimeout(timeout);
+      client.removeListener('webSession', onWebSession);
+      isBotReady = false;
+      reject(err);
+    }
   });
 }
 
@@ -192,8 +195,14 @@ client.on('webSession', (sessionId, cookies) => {
   });
 });
 
-client.on('error', (err) => {
-  console.error('❌ Steam error:', err);
+client.on('disconnected', (eresult, msg) => {
+  console.error('🔌 Steam disconnected:', eresult, msg);
+  isBotReady = false;
+});
+
+client.on('loggedOff', (eresult) => {
+  console.error('🚪 Steam logged off:', eresult);
+  isBotReady = false;
 });
 
 // ================== EXPRESS API ==================
@@ -254,6 +263,13 @@ app.post('/create-offer', async (req, res) => {
     return res.json({ ok: false, error: 'steamId, tradeUrl, assetids и callbackUrl обязательны' });
   }
 
+  if (!client.steamID || !isBotReady) {
+    return res.status(503).json({
+      ok: false,
+      error: 'Steam bot is not ready. Try again later.',
+    });
+  }
+
   console.log(`📨 Create offer for steamId=${steamId}, items=${assetids.length}`);
 
   try {
@@ -271,7 +287,7 @@ app.post('/create-offer', async (req, res) => {
       return res.json({ ok: false, error: 'Не нашли выбранные предметы в инвентаре' });
     }
 
-    await refreshWebSession();
+    // await refreshWebSession();
 
     const offer = manager.createOffer(tradeUrl);
     offer.addTheirItems(itemsToTake);
