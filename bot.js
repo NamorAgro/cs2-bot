@@ -36,6 +36,68 @@ const OFFER_MAP_PATH = path.join(__dirname, 'offer-callbacks.json');
 
 let isBotReady = false;
 
+let refreshPromise = null;
+
+function steamLogin() {
+  console.log('🔐 Logging in as', accountName, '...');
+
+  client.logOn({
+    accountName,
+    password: STEAM_BOT_PASSWORD,
+    twoFactorCode: getTwoFactorCode()
+  });
+}
+
+async function safeRefreshWebSession() {
+  if (!client.steamID) {
+    isBotReady = false;
+    throw new Error('Bot is not connected to Steam network yet');
+  }
+
+  if (refreshPromise) {
+    return refreshPromise;
+  }
+
+  refreshPromise = refreshWebSession().finally(() => {
+    refreshPromise = null;
+  });
+
+  return refreshPromise;
+}
+
+function getUserInventoryWithRetry(steamId) {
+  return new Promise((resolve, reject) => {
+    manager.getUserInventoryContents(steamId, 730, 2, true, async (err, inventory) => {
+      if (!err) return resolve(inventory);
+
+      console.error('❌ Inventory error:', err.message);
+
+      const msg = String(err.message || '');
+
+      if (
+        msg.includes('Not Logged In') ||
+        msg.includes('Cannot log onto steamcommunity')
+      ) {
+        try {
+          console.log('🔄 Trying to refresh Steam web session after inventory error...');
+          await safeRefreshWebSession();
+
+          manager.getUserInventoryContents(steamId, 730, 2, true, (err2, inventory2) => {
+            if (err2) return reject(err2);
+            resolve(inventory2);
+          });
+        } catch (refreshErr) {
+          reject(refreshErr);
+        }
+
+        return;
+      }
+
+      reject(err);
+    });
+  });
+}
+
 function refreshWebSession() {
   return new Promise((resolve, reject) => {
     if (!client.steamID) {
@@ -140,9 +202,7 @@ const logOnOptions = {
   twoFactorCode: getTwoFactorCode()
 };
 
-console.log('🔐 Logging in as', accountName, '...');
-
-client.logOn(logOnOptions);
+steamLogin();
 
 client.on('loggedOn', () => {
   console.log('✅ Bot logged in to Steam!');
@@ -188,21 +248,47 @@ client.on('webSession', (sessionId, cookies) => {
             );
           });
         } else {
-          console.log('⚠ У бота пустой инвентарь CS2 (730, contextId=2)');
+          console.log('⚠ Bot is empty CS2 (730, contextId=2)');
         }
       });
     });
   });
 });
 
+
+setInterval(async () => {
+  if (!client.steamID) {
+    console.warn('⚠ Cannot refresh web session: bot is not connected');
+    return;
+  }
+
+  try {
+    await safeRefreshWebSession();
+    console.log('✅ Scheduled Steam web session refresh complete');
+  } catch (err) {
+    console.error('❌ Scheduled Steam web session refresh failed:', err.message);
+  }
+}, 1000 * 60 * 60 * 12);
+
+
 client.on('disconnected', (eresult, msg) => {
   console.error('🔌 Steam disconnected:', eresult, msg);
   isBotReady = false;
+
+  setTimeout(() => {
+    console.log('🔁 Trying to reconnect to Steam...');
+    steamLogin();
+  }, 10000);
 });
 
 client.on('loggedOff', (eresult) => {
   console.error('🚪 Steam logged off:', eresult);
   isBotReady = false;
+
+  setTimeout(() => {
+    console.log('🔁 Trying to login again...');
+    steamLogin();
+  }, 10000);
 });
 
 // ================== EXPRESS API ==================
@@ -223,20 +309,24 @@ app.use((req, res, next) => {
 });
 
 // ---- /get-inventory ----
-app.post('/get-inventory', (req, res) => {
+app.post('/get-inventory', async (req, res) => {
   const steamId = req.body.steamId;
 
   if (!steamId) {
     return res.json({ ok: false, error: 'steamId required' });
   }
 
-  console.log(`📦 Request inventory for steamId: ${steamId}`);
+  if (!client.steamID || !isBotReady) {
+    return res.status(503).json({
+      ok: false,
+      error: 'Steam bot is not ready.',
+    });
+  }
 
-  manager.getUserInventoryContents(steamId, 730, 2, true, (err, inventory) => {
-    if (err) {
-      console.error('❌ Error loading user inventory:', err);
-      return res.json({ ok: false, error: err.message });
-    }
+  try {
+    console.log(`📦 Request inventory for steamId: ${steamId}`);
+
+    const inventory = await getUserInventoryWithRetry(steamId);
 
     const mapped = inventory.map((item) => ({
       assetid: item.assetid,
@@ -247,12 +337,18 @@ app.post('/get-inventory', (req, res) => {
         : null,
     }));
 
-    res.json({
+    return res.json({
       ok: true,
       count: mapped.length,
       items: mapped
     });
-  });
+  } catch (err) {
+    console.error('❌ Error loading user inventory:', err);
+    return res.json({
+      ok: false,
+      error: err.message || 'Unknown inventory error'
+    });
+  }
 });
 
 // ---- /create-offer ----
@@ -273,18 +369,13 @@ app.post('/create-offer', async (req, res) => {
   console.log(`📨 Create offer for steamId=${steamId}, items=${assetids.length}`);
 
   try {
-    const inventory = await new Promise((resolve, reject) => {
-      manager.getUserInventoryContents(steamId, 730, 2, true, (err, inventory) => {
-        if (err) return reject(err);
-        resolve(inventory);
-      });
-    });
+    const inventory = await getUserInventoryWithRetry(steamId);
 
     const itemsToTake = inventory.filter((it) => assetids.includes(it.assetid));
 
     if (!itemsToTake.length) {
       console.error('⚠ No matching items in user inventory for given assetids');
-      return res.json({ ok: false, error: 'Не нашли выбранные предметы в инвентаре' });
+      return res.json({ ok: false, error: 'Unable to find in internet' });
     }
 
     // await refreshWebSession();
@@ -312,7 +403,6 @@ app.post('/create-offer', async (req, res) => {
     });
   } catch (err) {
     console.error('❌ Error sending offer:', err);
-    isBotReady = false;
 
     return res.json({
       ok: false,
