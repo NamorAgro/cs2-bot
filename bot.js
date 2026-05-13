@@ -35,17 +35,54 @@ if (!STEAM_BOT_PASSWORD) {
 const OFFER_MAP_PATH = path.join(__dirname, 'offer-callbacks.json');
 
 let isBotReady = false;
-
 let refreshPromise = null;
+let loginInProgress = false;
+let reconnectTimer = null;
+
+function scheduleReconnect() {
+  if (reconnectTimer) {
+    return;
+  }
+
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+
+    if (!client.steamID) {
+      console.log('🔁 Reconnecting to Steam...');
+      steamLogin();
+    }
+  }, 15000);
+}
 
 function steamLogin() {
+  if (loginInProgress) {
+    console.log('⏳ Steam login already in progress, skipping...');
+    return;
+  }
+
+  if (client.steamID) {
+    console.log('✅ Already connected to Steam network, skipping login...');
+    return;
+  }
+
+  loginInProgress = true;
+
   console.log('🔐 Logging in as', accountName, '...');
 
-  client.logOn({
-    accountName,
-    password: STEAM_BOT_PASSWORD,
-    twoFactorCode: getTwoFactorCode()
-  });
+  try {
+    client.logOn({
+      accountName,
+      password: STEAM_BOT_PASSWORD,
+      twoFactorCode: getTwoFactorCode()
+    });
+  } catch (err) {
+     loginInProgress = false;
+  isBotReady = false;
+
+  console.error('❌ Steam error:', err);
+
+  scheduleReconnect();
+  }
 }
 
 async function safeRefreshWebSession() {
@@ -205,8 +242,19 @@ const logOnOptions = {
 steamLogin();
 
 client.on('loggedOn', () => {
+  loginInProgress = false;
+
   console.log('✅ Bot logged in to Steam!');
   client.setPersona(SteamUser.EPersonaState.Online);
+});
+
+client.on('error', (err) => {
+  loginInProgress = false;
+  isBotReady = false;
+
+  console.error('❌ Steam error:', err);
+
+  scheduleReconnect();
 });
 
 client.on('webSession', (sessionId, cookies) => {
@@ -272,23 +320,21 @@ setInterval(async () => {
 
 
 client.on('disconnected', (eresult, msg) => {
-  console.error('🔌 Steam disconnected:', eresult, msg);
+  loginInProgress = false;
   isBotReady = false;
 
-  setTimeout(() => {
-    console.log('🔁 Trying to reconnect to Steam...');
-    steamLogin();
-  }, 10000);
+  console.error('🔌 Steam disconnected:', eresult, msg);
+
+  scheduleReconnect();
 });
 
 client.on('loggedOff', (eresult) => {
-  console.error('🚪 Steam logged off:', eresult);
+  loginInProgress = false;
   isBotReady = false;
 
-  setTimeout(() => {
-    console.log('🔁 Trying to login again...');
-    steamLogin();
-  }, 10000);
+  console.error('🚪 Steam logged off:', eresult);
+
+  scheduleReconnect();
 });
 
 // ================== EXPRESS API ==================
@@ -359,11 +405,22 @@ app.post('/create-offer', async (req, res) => {
     return res.json({ ok: false, error: 'steamId, tradeUrl, assetids и callbackUrl обязательны' });
   }
 
-  if (!client.steamID || !isBotReady) {
+  if (!client.steamID) {
     return res.status(503).json({
       ok: false,
-      error: 'Steam bot is not ready. Try again later.',
+      error: 'Steam bot is disconnected from Steam network.',
     });
+  }
+
+  if (!isBotReady) {
+    try {
+      await safeRefreshWebSession();
+    } catch (err) {
+      return res.status(503).json({
+        ok: false,
+        error: `Steam bot is not ready: ${err.message}`,
+      });
+    }
   }
 
   console.log(`📨 Create offer for steamId=${steamId}, items=${assetids.length}`);
@@ -378,7 +435,7 @@ app.post('/create-offer', async (req, res) => {
       return res.json({ ok: false, error: 'Unable to find in internet' });
     }
 
-    // await refreshWebSession();
+    await safeRefreshWebSession();
 
     const offer = manager.createOffer(tradeUrl);
     offer.addTheirItems(itemsToTake);
