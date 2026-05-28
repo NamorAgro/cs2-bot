@@ -31,6 +31,34 @@ if (!STEAM_BOT_PASSWORD) {
   process.exit(1);
 }
 
+// ================== GAME CONFG ==================
+
+const GAMES = {
+  cs2: {
+    key: 'cs2',
+    appId: 730,
+    contextId: 2,
+    name: 'CS2',
+  },
+  rust: {
+    key: 'rust',
+    appId: 252490,
+    contextId: 2,
+    name: 'Rust',
+  },
+};
+
+function getGameConfig(game) {
+  const key = String(game || 'cs2').toLowerCase();
+
+  if (!GAMES[key]) {
+    throw new Error(`Unsupported game: ${game}`);
+  }
+
+  return GAMES[key];
+}
+
+
 // ================== STEAM AUTH ==================
 const OFFER_MAP_PATH = path.join(__dirname, 'offer-callbacks.json');
 
@@ -52,6 +80,47 @@ function scheduleReconnect() {
       steamLogin();
     }
   }, 15000);
+}
+
+function cancelActiveOffersToUser(steamId) {
+  return new Promise((resolve, reject) => {
+    manager.getOffers(
+      TradeOfferManager.EOfferFilter.SentOnly,
+      (err, sent) => {
+        if (err) return reject(err);
+
+        const activeOffers = sent.filter((offer) => {
+          return (
+            String(offer.partner.getSteamID64()) === String(steamId) &&
+            offer.state === TradeOfferManager.ETradeOfferState.Active
+          );
+        });
+
+        if (!activeOffers.length) {
+          return resolve(0);
+        }
+
+        let canceled = 0;
+        let failed = 0;
+
+        activeOffers.forEach((offer) => {
+          offer.cancel((cancelErr) => {
+            if (cancelErr) {
+              failed++;
+              console.error(`❌ Failed to cancel offer ${offer.id}:`, cancelErr.message);
+            } else {
+              canceled++;
+              console.log(`🚫 Canceled old active offer ${offer.id}`);
+            }
+
+            if (canceled + failed === activeOffers.length) {
+              resolve(canceled);
+            }
+          });
+        });
+      }
+    );
+  });
 }
 
 function steamLogin() {
@@ -76,12 +145,12 @@ function steamLogin() {
       twoFactorCode: getTwoFactorCode()
     });
   } catch (err) {
-     loginInProgress = false;
-  isBotReady = false;
+    loginInProgress = false;
+    isBotReady = false;
 
-  console.error('❌ Steam error:', err);
+    console.error('❌ Steam error:', err);
 
-  scheduleReconnect();
+    scheduleReconnect();
   }
 }
 
@@ -102,36 +171,48 @@ async function safeRefreshWebSession() {
   return refreshPromise;
 }
 
-function getUserInventoryWithRetry(steamId) {
+function getUserInventoryWithRetry(steamId, gameConfig) {
   return new Promise((resolve, reject) => {
-    manager.getUserInventoryContents(steamId, 730, 2, true, async (err, inventory) => {
-      if (!err) return resolve(inventory);
+    manager.getUserInventoryContents(
+      steamId,
+      gameConfig.appId,
+      gameConfig.contextId,
+      true,
+      async (err, inventory) => {
+        if (!err) return resolve(inventory);
 
-      console.error('❌ Inventory error:', err.message);
+        console.error(`❌ ${gameConfig.name} inventory error:`, err.message);
 
-      const msg = String(err.message || '');
+        const msg = String(err.message || '');
 
-      if (
-        msg.includes('Not Logged In') ||
-        msg.includes('Cannot log onto steamcommunity')
-      ) {
-        try {
-          console.log('🔄 Trying to refresh Steam web session after inventory error...');
-          await safeRefreshWebSession();
+        if (
+          msg.includes('Not Logged In') ||
+          msg.includes('Cannot log onto steamcommunity')
+        ) {
+          try {
+            console.log('🔄 Trying to refresh Steam web session after inventory error...');
+            await safeRefreshWebSession();
 
-          manager.getUserInventoryContents(steamId, 730, 2, true, (err2, inventory2) => {
-            if (err2) return reject(err2);
-            resolve(inventory2);
-          });
-        } catch (refreshErr) {
-          reject(refreshErr);
+            manager.getUserInventoryContents(
+              steamId,
+              gameConfig.appId,
+              gameConfig.contextId,
+              true,
+              (err2, inventory2) => {
+                if (err2) return reject(err2);
+                resolve(inventory2);
+              }
+            );
+          } catch (refreshErr) {
+            reject(refreshErr);
+          }
+
+          return;
         }
 
-        return;
+        reject(err);
       }
-
-      reject(err);
-    });
+    );
   });
 }
 
@@ -356,7 +437,8 @@ app.use((req, res, next) => {
 
 // ---- /get-inventory ----
 app.post('/get-inventory', async (req, res) => {
-  const steamId = req.body.steamId;
+  const { steamId, game = 'cs2' } = req.body;
+  const gameConfig = getGameConfig(game);
 
   if (!steamId) {
     return res.json({ ok: false, error: 'steamId required' });
@@ -372,7 +454,7 @@ app.post('/get-inventory', async (req, res) => {
   try {
     console.log(`📦 Request inventory for steamId: ${steamId}`);
 
-    const inventory = await getUserInventoryWithRetry(steamId);
+    const inventory = await getUserInventoryWithRetry(steamId, gameConfig);
 
     const mapped = inventory.map((item) => ({
       assetid: item.assetid,
@@ -426,7 +508,7 @@ app.post('/create-offer', async (req, res) => {
   console.log(`📨 Create offer for steamId=${steamId}, items=${assetids.length}`);
 
   try {
-    const inventory = await getUserInventoryWithRetry(steamId);
+    const inventory = await getUserInventoryWithRetry(steamId, gameConfig);
 
     const itemsToTake = inventory.filter((it) => assetids.includes(it.assetid));
 
@@ -436,6 +518,8 @@ app.post('/create-offer', async (req, res) => {
     }
 
     await safeRefreshWebSession();
+
+    await cancelActiveOffersToUser(steamId);
 
     const offer = manager.createOffer(tradeUrl);
     offer.addTheirItems(itemsToTake);
