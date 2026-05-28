@@ -468,6 +468,16 @@ app.post('/get-inventory', async (req, res) => {
 
     const inventory = await getUserInventoryWithRetry(steamId, gameConfig);
 
+    if (!inventory.length) {
+      return res.json({
+        ok: true,
+        game: gameConfig.key,
+        count: 0,
+        items: [],
+        message: `No ${gameConfig.name} items available for sale.`,
+      });
+    }
+
     const mapped = inventory.map((item) => ({
       assetid: item.assetid,
       classid: item.classid,
