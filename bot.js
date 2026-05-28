@@ -327,6 +327,12 @@ client.on('loggedOn', () => {
 
   console.log('✅ Bot logged in to Steam!');
   client.setPersona(SteamUser.EPersonaState.Online);
+
+  setTimeout(() => {
+    if (client.steamID) {
+      client.webLogOn();
+    }
+  }, 3000);
 });
 
 client.on('error', (err) => {
@@ -388,6 +394,9 @@ client.on('webSession', (sessionId, cookies) => {
 setInterval(async () => {
   if (!client.steamID) {
     console.warn('⚠ Cannot refresh web session: bot is not connected');
+    isBotReady = false;
+    loginInProgress = false;
+    scheduleReconnect();
     return;
   }
 
@@ -396,6 +405,8 @@ setInterval(async () => {
     console.log('✅ Scheduled Steam web session refresh complete');
   } catch (err) {
     console.error('❌ Scheduled Steam web session refresh failed:', err.message);
+    isBotReady = false;
+    scheduleReconnect();
   }
 }, 1000 * 60 * 60 * 12);
 
@@ -481,7 +492,8 @@ app.post('/get-inventory', async (req, res) => {
 
 // ---- /create-offer ----
 app.post('/create-offer', async (req, res) => {
-  const { steamId, tradeUrl, assetids, callbackUrl } = req.body;
+  const { steamId, tradeUrl, assetids, callbackUrl, game = 'cs2' } = req.body;
+  const gameConfig = getGameConfig(game);
 
   if (!steamId || !tradeUrl || !Array.isArray(assetids) || assetids.length === 0 || !callbackUrl) {
     return res.json({ ok: false, error: 'steamId, tradeUrl, assetids и callbackUrl обязательны' });
