@@ -448,22 +448,23 @@ app.use((req, res, next) => {
 
 // ---- /get-inventory ----
 app.post('/get-inventory', async (req, res) => {
-  const { steamId, game = 'cs2' } = req.body;
-  const gameConfig = getGameConfig(game);
-
-  if (!steamId) {
-    return res.json({ ok: false, error: 'steamId required' });
-  }
-
-  if (!client.steamID || !isBotReady) {
-    return res.status(503).json({
-      ok: false,
-      error: 'Steam bot is not ready.',
-    });
-  }
-
   try {
-    console.log(`📦 Request inventory for steamId: ${steamId}`);
+    const { steamId, game = 'cs2' } = req.body;
+
+    if (!steamId) {
+      return res.json({ ok: false, error: 'steamId required' });
+    }
+
+    const gameConfig = getGameConfig(game);
+
+    if (!client.steamID || !isBotReady) {
+      return res.status(503).json({
+        ok: false,
+        error: 'Steam bot is not ready.',
+      });
+    }
+
+    console.log(`📦 Request ${gameConfig.name} inventory for steamId: ${steamId}`);
 
     const inventory = await getUserInventoryWithRetry(steamId, gameConfig);
 
@@ -478,12 +479,15 @@ app.post('/get-inventory', async (req, res) => {
 
     return res.json({
       ok: true,
+      game: gameConfig.key,
       count: mapped.length,
       items: mapped
     });
+
   } catch (err) {
     console.error('❌ Error loading user inventory:', err);
-    return res.json({
+
+    return res.status(400).json({
       ok: false,
       error: err.message || 'Unknown inventory error'
     });
