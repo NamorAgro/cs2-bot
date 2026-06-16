@@ -85,11 +85,11 @@ function scheduleReconnect() {
 function cancelActiveOffersToUser(steamId) {
   return new Promise((resolve, reject) => {
     manager.getOffers(
-      TradeOfferManager.EOfferFilter.SentOnly,
-      (err, sent) => {
+      TradeOfferManager.EOfferFilter.ActiveOnly,
+      (err, sentOffers, receivedOffers) => {
         if (err) return reject(err);
 
-        const activeOffers = sent.filter((offer) => {
+        const activeOffers = sentOffers.filter((offer) => {
           return (
             String(offer.partner.getSteamID64()) === String(steamId) &&
             offer.state === TradeOfferManager.ETradeOfferState.Active
@@ -100,20 +100,21 @@ function cancelActiveOffersToUser(steamId) {
           return resolve(0);
         }
 
+        let finished = 0;
         let canceled = 0;
-        let failed = 0;
 
         activeOffers.forEach((offer) => {
           offer.cancel((cancelErr) => {
+            finished++;
+
             if (cancelErr) {
-              failed++;
               console.error(`❌ Failed to cancel offer ${offer.id}:`, cancelErr.message);
             } else {
               canceled++;
               console.log(`🚫 Canceled old active offer ${offer.id}`);
             }
 
-            if (canceled + failed === activeOffers.length) {
+            if (finished === activeOffers.length) {
               resolve(canceled);
             }
           });
@@ -187,7 +188,8 @@ function getUserInventoryWithRetry(steamId, gameConfig) {
 
         if (
           msg.includes('Not Logged In') ||
-          msg.includes('Cannot log onto steamcommunity')
+          msg.includes('Cannot log onto steamcommunity') ||
+          msg.includes('HTTP error 401')
         ) {
           try {
             console.log('🔄 Trying to refresh Steam web session after inventory error...');
