@@ -16,6 +16,8 @@ const API_BASE_URL = process.env.API_BASE_URL;
 const BOT_API_KEY = process.env.BOT_API_KEY;
 const STEAM_BOT_PASSWORD = process.env.STEAM_BOT_PASSWORD;
 
+
+
 if (!API_BASE_URL) {
   console.error('❌ API_BASE_URL is not set in .env');
   process.exit(1);
@@ -29,6 +31,15 @@ if (!BOT_API_KEY) {
 if (!STEAM_BOT_PASSWORD) {
   console.error('❌ STEAM_BOT_PASSWORD is not set in .env');
   process.exit(1);
+}
+
+const inventoryCache = new Map();
+const inventoryRequests = new Map();
+
+const INVENTORY_CACHE_TTL = 30_000;
+
+function getInventoryKey(steamId, gameConfig) {
+  return `${gameConfig.key}:${steamId}`;
 }
 
 // ================== GAME CONFG ==================
@@ -66,6 +77,8 @@ let isBotReady = false;
 let refreshPromise = null;
 let loginInProgress = false;
 let reconnectTimer = null;
+
+
 
 function scheduleReconnect() {
   if (reconnectTimer) {
@@ -172,7 +185,7 @@ async function safeRefreshWebSession() {
   return refreshPromise;
 }
 
-function getUserInventoryWithRetry(steamId, gameConfig) {
+function requestUserInventory(steamId, gameConfig) {
   return new Promise((resolve, reject) => {
     manager.getUserInventoryContents(
       steamId,
@@ -180,19 +193,29 @@ function getUserInventoryWithRetry(steamId, gameConfig) {
       gameConfig.contextId,
       true,
       async (err, inventory) => {
-        if (!err) return resolve(inventory);
+        if (!err) {
+          return resolve(inventory);
+        }
 
-        console.error(`❌ ${gameConfig.name} inventory error:`, err.message);
+        console.error(
+          `❌ ${gameConfig.name} inventory error:`,
+          err.message
+        );
 
         const msg = String(err.message || '');
+        const code = Number(err.code);
 
         if (
+          code === 401 ||
           msg.includes('Not Logged In') ||
           msg.includes('Cannot log onto steamcommunity') ||
           msg.includes('HTTP error 401')
         ) {
           try {
-            console.log('🔄 Trying to refresh Steam web session after inventory error...');
+            console.log(
+              '🔄 Trying to refresh Steam web session after inventory error...'
+            );
+
             await safeRefreshWebSession();
 
             manager.getUserInventoryContents(
@@ -200,9 +223,12 @@ function getUserInventoryWithRetry(steamId, gameConfig) {
               gameConfig.appId,
               gameConfig.contextId,
               true,
-              (err2, inventory2) => {
-                if (err2) return reject(err2);
-                resolve(inventory2);
+              (retryErr, retryInventory) => {
+                if (retryErr) {
+                  return reject(retryErr);
+                }
+
+                resolve(retryInventory);
               }
             );
           } catch (refreshErr) {
@@ -218,6 +244,57 @@ function getUserInventoryWithRetry(steamId, gameConfig) {
   });
 }
 
+async function getUserInventoryWithRetry(
+  steamId,
+  gameConfig,
+  options = {}
+) {
+  const { forceRefresh = false } = options;
+  const key = getInventoryKey(steamId, gameConfig);
+
+  if (!forceRefresh) {
+    const cached = inventoryCache.get(key);
+
+    if (
+      cached &&
+      Date.now() - cached.createdAt < INVENTORY_CACHE_TTL
+    ) {
+      console.log(
+        `♻️ Returning cached ${gameConfig.name} inventory for ${steamId}`
+      );
+
+      return cached.inventory;
+    }
+  }
+
+  const existingRequest = inventoryRequests.get(key);
+
+  if (existingRequest) {
+    console.log(
+      `🔗 Joining existing ${gameConfig.name} inventory request for ${steamId}`
+    );
+
+    return existingRequest;
+  }
+
+  const request = requestUserInventory(steamId, gameConfig)
+    .then((inventory) => {
+      inventoryCache.set(key, {
+        createdAt: Date.now(),
+        inventory,
+      });
+
+      return inventory;
+    })
+    .finally(() => {
+      inventoryRequests.delete(key);
+    });
+
+  inventoryRequests.set(key, request);
+
+  return request;
+}
+
 function refreshWebSession() {
   return new Promise((resolve, reject) => {
     if (!client.steamID) {
@@ -231,13 +308,16 @@ function refreshWebSession() {
 
     const timeout = setTimeout(() => {
       if (settled) return;
+
       settled = true;
       client.removeListener('webSession', onWebSession);
+
       reject(new Error('Timeout while refreshing Steam web session'));
     }, 15000);
 
     const onWebSession = (sessionId, cookies) => {
       if (settled) return;
+
       settled = true;
       clearTimeout(timeout);
 
@@ -251,20 +331,13 @@ function refreshWebSession() {
 
         isBotReady = true;
         console.log('✅ TradeOfferManager cookies refreshed');
+
         resolve();
       });
     };
 
     client.once('webSession', onWebSession);
-
-    try {
-      client.webLogOn();
-    } catch (err) {
-      clearTimeout(timeout);
-      client.removeListener('webSession', onWebSession);
-      isBotReady = false;
-      reject(err);
-    }
+    client.webLogOn();
   });
 }
 
@@ -329,12 +402,6 @@ client.on('loggedOn', () => {
 
   console.log('✅ Bot logged in to Steam!');
   client.setPersona(SteamUser.EPersonaState.Online);
-
-  setTimeout(() => {
-    if (client.steamID) {
-      client.webLogOn();
-    }
-  }, 3000);
 });
 
 client.on('error', (err) => {
@@ -353,41 +420,21 @@ client.on('webSession', (sessionId, cookies) => {
 
   manager.setCookies(cookies, (err) => {
     if (err) {
-      console.error('❌ Error setting TradeOfferManager cookies:', err);
       isBotReady = false;
+      console.error('❌ Error setting manager cookies:', err);
       return;
     }
 
     community.acknowledgeTradeProtection((ackErr) => {
       if (ackErr) {
-        console.error('❌ Error acknowledging trade protection:', ackErr);
         isBotReady = false;
+        console.error('❌ Trade protection error:', ackErr);
         return;
       }
 
       isBotReady = true;
       console.log('✅ Trade protection acknowledged');
       console.log('✅ TradeOfferManager is ready');
-
-      manager.getInventoryContents(730, 2, true, (invErr, inventory) => {
-        if (invErr) {
-          console.error('❌ Error loading bot inventory:', invErr);
-          return;
-        }
-
-        console.log(`🎒 Bot CS2 inventory loaded. Items count: ${inventory.length}`);
-
-        if (inventory.length > 0) {
-          console.log('Примеры предметов:');
-          inventory.slice(0, 5).forEach((item, idx) => {
-            console.log(
-              `#${idx + 1}: ${item.market_hash_name} (assetid=${item.assetid})`
-            );
-          });
-        } else {
-          console.log('⚠ Bot is empty CS2 (730, contextId=2)');
-        }
-      });
     });
   });
 });
@@ -438,11 +485,22 @@ app.use(express.json());
 
 
 app.use((req, res, next) => {
-  const key = req.headers['x-bot-api-key'];
+  const providedKey = req.headers['x-bot-api-key'];
 
-  if (!key || key !== BOT_API_KEY) {
-    console.warn('⚠ Unauthorized request to bot API from', req.ip);
-    return res.status(401).json({ ok: false, error: 'Unauthorized' });
+  if (providedKey !== process.env.BOT_API_KEY) {
+    console.warn('⚠ Unauthorized bot API request', {
+      time: new Date().toISOString(),
+      ip: req.ip,
+      method: req.method,
+      path: req.originalUrl,
+      userAgent: req.headers['user-agent'],
+      hasKey: Boolean(providedKey),
+    });
+
+    return res.status(401).json({
+      ok: false,
+      error: 'Unauthorized',
+    });
   }
 
   next();
@@ -536,7 +594,13 @@ app.post('/create-offer', async (req, res) => {
   console.log(`📨 Create offer for steamId=${steamId}, items=${assetids.length}`);
 
   try {
-    const inventory = await getUserInventoryWithRetry(steamId, gameConfig);
+    const inventory = await getUserInventoryWithRetry(
+      steamId,
+      gameConfig,
+      {
+        forceRefresh: true,
+      }
+    );
 
     const itemsToTake = inventory.filter((it) => assetids.includes(it.assetid));
 
@@ -545,7 +609,7 @@ app.post('/create-offer', async (req, res) => {
       return res.json({ ok: false, error: 'Unable to find in internet' });
     }
 
-    await safeRefreshWebSession();
+    // await safeRefreshWebSession();
 
     await cancelActiveOffersToUser(steamId);
 
