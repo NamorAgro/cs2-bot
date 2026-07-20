@@ -10,6 +10,23 @@ const SteamCommunity = require('steamcommunity');
 const SteamTotp = require('steam-totp');
 const TradeOfferManager = require('steam-tradeoffer-manager');
 
+// ================== AGEENT ========================
+
+const { Agent } = require('undici');
+
+const steamAgent = new Agent({
+  connect: {
+    family: 4,
+  },
+});
+
+
+const { execFile } = require('node:child_process');
+const { promisify } = require('node:util');
+
+const execFileAsync = promisify(execFile);
+
+
 // ================== CONFIG & ENV ==================
 
 const API_BASE_URL = process.env.API_BASE_URL;
@@ -251,27 +268,61 @@ async function getPublicSteamInventory(
 ) {
   const url =
     `https://steamcommunity.com/inventory/${steamId}/${appId}/${contextId}` +
-    `?l=english&count=100`;
+    `?l=english&count=500`;
 
-  const response = await fetch(url, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0',
-      Accept: 'application/json',
-    },
-  });
+  let stdout;
 
-  if (!response.ok) {
-    const error = new Error(
-      `Steam inventory HTTP error ${response.status}`
+  try {
+    const result = await execFileAsync(
+      'curl',
+      [
+        '--silent',
+        '--show-error',
+        '--fail-with-body',
+        '--max-time',
+        '15',
+        '--connect-timeout',
+        '5',
+        '--header',
+        'Accept: application/json',
+        '--header',
+        'User-Agent: Mozilla/5.0',
+        url,
+      ],
+      {
+        maxBuffer: 20 * 1024 * 1024,
+      }
     );
 
-    error.code = response.status;
+    stdout = result.stdout;
+  } catch (err) {
+    const statusMatch = String(err.stderr || '').match(
+      /The requested URL returned error: (\d+)/
+    );
+
+    const status = statusMatch
+      ? Number(statusMatch[1])
+      : null;
+
+    const error = new Error(
+      status
+        ? `Steam inventory HTTP error ${status}`
+        : `Steam inventory request failed: ${err.message}`
+    );
+
+    error.code = status;
     throw error;
   }
 
-  const data = await response.json();
+  let data;
 
-  if (!data.success && data.success !== undefined) {
+  try {
+    data = JSON.parse(stdout);
+  } catch {
+    throw new Error('Steam returned invalid inventory JSON');
+  }
+
+  if (data.success === false) {
     throw new Error('Steam inventory response was unsuccessful');
   }
 
