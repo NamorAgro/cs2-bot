@@ -12,14 +12,6 @@ const TradeOfferManager = require('steam-tradeoffer-manager');
 
 // ================== AGEENT ========================
 
-const { Agent } = require('undici');
-
-const steamAgent = new Agent({
-  connect: {
-    family: 4,
-  },
-});
-
 
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
