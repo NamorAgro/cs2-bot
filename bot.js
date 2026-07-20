@@ -244,6 +244,74 @@ function requestUserInventory(steamId, gameConfig) {
   });
 }
 
+async function getPublicSteamInventory(
+  steamId,
+  appId = 730,
+  contextId = 2
+) {
+  const url =
+    `https://steamcommunity.com/inventory/${steamId}/${appId}/${contextId}` +
+    `?l=english&count=5000`;
+
+  const response = await fetch(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0',
+      Accept: 'application/json',
+    },
+  });
+
+  if (!response.ok) {
+    const error = new Error(
+      `Steam inventory HTTP error ${response.status}`
+    );
+
+    error.code = response.status;
+    throw error;
+  }
+
+  const data = await response.json();
+
+  if (!data.success && data.success !== undefined) {
+    throw new Error('Steam inventory response was unsuccessful');
+  }
+
+  const descriptionsMap = new Map();
+
+  for (const description of data.descriptions ?? []) {
+    const key =
+      `${description.classid}_${description.instanceid}`;
+
+    descriptionsMap.set(key, description);
+  }
+
+  return (data.assets ?? []).map((asset) => {
+    const key = `${asset.classid}_${asset.instanceid}`;
+    const description = descriptionsMap.get(key);
+
+    return {
+      appid: Number(asset.appid),
+      contextid: String(asset.contextid),
+      assetid: String(asset.assetid),
+      amount: Number(asset.amount ?? 1),
+
+      classid: String(asset.classid),
+      instanceid: String(asset.instanceid),
+
+      market_hash_name:
+        description?.market_hash_name ?? 'Unknown item',
+
+      name:
+        description?.name ?? 'Unknown item',
+
+      icon_url:
+        description?.icon_url ?? null,
+
+      tradable:
+        description?.tradable === 1,
+    };
+  });
+}
+
 async function getUserInventoryWithRetry(
   steamId,
   gameConfig,
@@ -277,7 +345,11 @@ async function getUserInventoryWithRetry(
     return existingRequest;
   }
 
-  const request = requestUserInventory(steamId, gameConfig)
+  const request = getPublicSteamInventory(
+    steamId,
+    gameConfig.appId,
+    gameConfig.contextId
+  )
     .then((inventory) => {
       inventoryCache.set(key, {
         createdAt: Date.now(),
@@ -526,7 +598,10 @@ app.post('/get-inventory', async (req, res) => {
 
     console.log(`📦 Request ${gameConfig.name} inventory for steamId: ${steamId}`);
 
-    const inventory = await getUserInventoryWithRetry(steamId, gameConfig);
+    const inventory = await getUserInventoryWithRetry(
+      steamId,
+      gameConfig
+    );
 
     if (!inventory.length) {
       return res.json({
@@ -543,7 +618,7 @@ app.post('/get-inventory', async (req, res) => {
       classid: item.classid,
       market_hash_name: item.market_hash_name,
       icon: item.icon_url
-        ? `https://steamcommunity-a.akamaihd.net/economy/image/${item.icon_url}`
+        ? `https://community.cloudflare.steamstatic.com/economy/image/${item.icon_url}`
         : null,
     }));
 
@@ -557,87 +632,145 @@ app.post('/get-inventory', async (req, res) => {
   } catch (err) {
     console.error('❌ Error loading user inventory:', err);
 
-    return res.status(400).json({
+    const status = Number(err.code);
+
+    if (status === 429) {
+      return res.status(429).json({
+        ok: false,
+        error: 'Steam rate limit. Try again later.',
+      });
+    }
+
+    if (status === 403) {
+      return res.status(403).json({
+        ok: false,
+        error: 'Steam inventory is private or unavailable.',
+      });
+    }
+
+    return res.status(502).json({
       ok: false,
-      error: err.message || 'Unknown inventory error'
+      error: err.message || 'Unable to load Steam inventory.',
     });
   }
 });
 
 // ---- /create-offer ----
 app.post('/create-offer', async (req, res) => {
-  const { steamId, tradeUrl, assetids, callbackUrl, game = 'cs2' } = req.body;
-  const gameConfig = getGameConfig(game);
+  try {
+    const { steamId, tradeUrl, assetids, callbackUrl, game = 'cs2' } = req.body;
+    const gameConfig = getGameConfig(game);
 
-  if (!steamId || !tradeUrl || !Array.isArray(assetids) || assetids.length === 0 || !callbackUrl) {
-    return res.json({ ok: false, error: 'steamId, tradeUrl, assetids и callbackUrl обязательны' });
-  }
+    if (!steamId || !tradeUrl || !Array.isArray(assetids) || assetids.length === 0 || !callbackUrl) {
+      return res.json({ ok: false, error: 'steamId, tradeUrl, assetids и callbackUrl обязательны' });
+    }
 
-  if (!client.steamID) {
-    return res.status(503).json({
-      ok: false,
-      error: 'Steam bot is disconnected from Steam network.',
-    });
-  }
-
-  if (!isBotReady) {
-    try {
-      await safeRefreshWebSession();
-    } catch (err) {
+    if (!client.steamID) {
       return res.status(503).json({
         ok: false,
-        error: `Steam bot is not ready: ${err.message}`,
+        error: 'Steam bot is disconnected from Steam network.',
+      });
+    }
+
+    if (!isBotReady) {
+      try {
+        await safeRefreshWebSession();
+      } catch (err) {
+        return res.status(503).json({
+          ok: false,
+          error: `Steam bot is not ready: ${err.message}`,
+        });
+      }
+    }
+
+    console.log(`📨 Create offer for steamId=${steamId}, items=${assetids.length}`);
+
+    try {
+      const inventory = await getUserInventoryWithRetry(
+        steamId,
+        gameConfig,
+        {
+          forceRefresh: true,
+        }
+      );
+
+      const selectedAssetIds = new Set(
+        assetids.map(String)
+      );
+
+      const itemsToTake = inventory.filter(
+        (item) =>
+          selectedAssetIds.has(String(item.assetid)) &&
+          item.tradable
+      );
+
+      if (itemsToTake.length !== selectedAssetIds.size) {
+        const foundAssetIds = new Set(
+          itemsToTake.map((item) => String(item.assetid))
+        );
+
+        const missingAssetIds = [...selectedAssetIds].filter(
+          (assetid) => !foundAssetIds.has(assetid)
+        );
+
+        console.error(
+          '⚠ Some selected items were not found or are not tradable:',
+          missingAssetIds
+        );
+
+        return res.status(409).json({
+          ok: false,
+          error:
+            'Some selected items are no longer available or are not tradable.',
+          missingAssetIds,
+        });
+      }
+
+      // await safeRefreshWebSession();
+
+      await cancelActiveOffersToUser(steamId);
+
+      const offer = manager.createOffer(tradeUrl);
+      offer.addTheirItems(
+        itemsToTake.map((item) => ({
+          appid: item.appid,
+          contextid: item.contextid,
+          assetid: item.assetid,
+          amount: item.amount,
+        }))
+      );
+      offer.setMessage('Выкуп ваших CS2 скинов на нашем сайте');
+
+      const result = await new Promise((resolve, reject) => {
+        offer.send((sendErr, status) => {
+          if (sendErr) return reject(sendErr);
+          resolve(status);
+        });
+      });
+
+      setOfferCallback(String(offer.id), callbackUrl);
+
+      console.log(`✅ Offer sent. ID=${offer.id}, status=${result}`);
+      console.log(`🔗 Saved callback for offer ${offer.id}: ${callbackUrl}`);
+
+      return res.json({
+        ok: true,
+        offerId: offer.id,
+        status: result,
+      });
+    } catch (err) {
+      console.error('❌ Error sending offer:', err);
+
+      return res.json({
+        ok: false,
+        error: err.message || 'Unknown error',
       });
     }
   }
-
-  console.log(`📨 Create offer for steamId=${steamId}, items=${assetids.length}`);
-
-  try {
-    const inventory = await getUserInventoryWithRetry(
-      steamId,
-      gameConfig,
-      {
-        forceRefresh: true,
-      }
-    );
-
-    const itemsToTake = inventory.filter((it) => assetids.includes(it.assetid));
-
-    if (!itemsToTake.length) {
-      console.error('⚠ No matching items in user inventory for given assetids');
-      return res.json({ ok: false, error: 'Unable to find in internet' });
-    }
-
-    // await safeRefreshWebSession();
-
-    await cancelActiveOffersToUser(steamId);
-
-    const offer = manager.createOffer(tradeUrl);
-    offer.addTheirItems(itemsToTake);
-    offer.setMessage('Выкуп ваших CS2 скинов на нашем сайте');
-
-    const result = await new Promise((resolve, reject) => {
-      offer.send((sendErr, status) => {
-        if (sendErr) return reject(sendErr);
-        resolve(status);
-      });
-    });
-
-    setOfferCallback(String(offer.id), callbackUrl);
-
-    console.log(`✅ Offer sent. ID=${offer.id}, status=${result}`);
-    console.log(`🔗 Saved callback for offer ${offer.id}: ${callbackUrl}`);
-
-    return res.json({
-      ok: true,
-      offerId: offer.id,
-      status: result,
-    });
-  } catch (err) {
+  catch (err) {
     console.error('❌ Error sending offer:', err);
 
-    return res.json({
+    return res.status(500).json({
       ok: false,
       error: err.message || 'Unknown error',
     });
