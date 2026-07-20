@@ -251,7 +251,7 @@ async function getPublicSteamInventory(
 ) {
   const url =
     `https://steamcommunity.com/inventory/${steamId}/${appId}/${contextId}` +
-    `?l=english&count=5000`;
+    `?l=english&count=100`;
 
   const response = await fetch(url, {
     headers: {
