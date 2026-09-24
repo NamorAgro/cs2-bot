@@ -4,11 +4,8 @@
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js",
-    "dev": "node bot.js",
-    "test": "node tests/run.cjs",
-    "check:config": "node scripts/check-config.js"
+    "dev": "node bot.js"
   },
-  "engines": { "node": ">=22.14.0 <23" },
   "dependencies": {
     "express": "^5.1.0",
     "steam-totp": "^2.1.2",
@@ -25,8 +22,6 @@
     "bot",
     "for",
     "cs2",
-    "rust",
-    "dota2",
     "trading"
   ],
   "author": "",
