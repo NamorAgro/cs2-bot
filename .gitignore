@@ -1,2 +1,11 @@
 /.env
 .env
+.env.*
+!.env.example
+node_modules/
+lib/secrets/
+*.maFile
+offer-callbacks.json
+offer-callbacks.json.tmp
+polldata*.json
+*.log
