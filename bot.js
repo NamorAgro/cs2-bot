@@ -281,10 +281,6 @@ async function getPublicSteamInventory(
         '15',
         '--connect-timeout',
         '5',
-        '--header',
-        'Accept: application/json',
-        '--header',
-        'User-Agent: Mozilla/5.0',
         url,
       ],
       {
